@@ -4,11 +4,6 @@ Real-time pedal misoperation detector (fusion of VIDEO/AUDIO/OBD2)
 - 입력: VIDEO 1개 확률값, AUDIO 1개 확률값, OBD2(시리얼) 4개 값 {speed,rpm,throttle,brake}
 - 구조: Producer(3) -> Queue -> Consumer(판단 루프) -> 경고/로그
 """
-import os
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-
 import sys
 
 import time
@@ -31,11 +26,8 @@ from producers.serial_loop import serial_producer_loopback_sim
 from sensors.voice_rtprob import VoiceRTProb
 from producers.audio_rtprob_producer import audio_rtprob_producer
 
-# warning 시나리오
 from producers.warning_obd_sim import warning_obd_sim
 from producers.warning_video_pulse import warning_video_pulse
-from producers.warning_video_constant import warning_video_constant
-
 
 try:
     # 라인마다 바로 쓰고 내부 버퍼 우회
@@ -45,21 +37,17 @@ except Exception:
     pass
 
 # ==================
-# 로깅/출력 유틸 (시간 기반 스로틀)
+# 5) 로깅/출력 유틸
 # ==================
-_last_emit_ts = 0.0
-def emit_event(ev, *, min_interval=0.10):  # 0.10s => 10Hz
-    global _last_emit_ts
-    now = time.monotonic()
-    if (now - _last_emit_ts) < min_interval:
-        return
-    _last_emit_ts = now
-    line = json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n"
-    try:
-        os.write(1, line.encode("utf-8"))  # stdout에 직접 씀 (print보다 훨씬 빠름)
-    except Exception:
-        sys.stdout.write(line); sys.stdout.flush()
 
+_last_print_prob = None
+def emit_event(ev):
+    global _last_print_prob
+    p = ev.get("score", 0.0)
+    if (_last_print_prob is None) or (abs(p - _last_print_prob) >= 0.05) or (ev["decision"] == "ALERT"):
+        line = json.dumps(ev, ensure_ascii=False, separators=(",", ":"))
+        sys.stdout.write(line + "\n"); sys.stdout.flush()
+        _last_print_prob = p
 
 
 # 전역 큐/종료 이벤트
@@ -212,8 +200,6 @@ def decision_loop():
     while not EV_STOP.is_set():
         # 1) 큐 비우기 (burst drain)
         drained = 0
-        printed = 0
-        last_rate = time.monotonic()
         while True:
             try:
                 m: Msg = Q.get_nowait()
@@ -230,12 +216,6 @@ def decision_loop():
                 if res["decision"] == "ALERT":
                     last_alert_ts = res["ts"]
                 emit_event(res)
-                printed += 1
-                now2 = time.monotonic()
-                if now2 - last_rate >= 1.0:
-                    sys.stderr.write(f"[rate] emitted={printed} lines/s\n"); sys.stderr.flush()
-                    printed = 0
-                    last_rate = now2
 
             # 다음 틱 예약 (drift 방지)
             next_t += decide_dt
@@ -262,18 +242,16 @@ def main():
         # ),
         
          # 경고용 비디오 펄스 (WARNING 유지)
-        threading.Thread(
-            target=warning_video_constant,
-            kwargs={"Q": Q, "hz": CFG.video_hz, "stop_event": EV_STOP,
-                    "level": 0.85, "jitter": 0.02},
-            daemon=True
-        ),
+        #threading.Thread(target=warning_video_pulse,
+        #                 kwargs={"Q": Q, "hz": CFG.video_hz, "stop_event": EV_STOP,
+        #                         "base": 0.15, "peak": 0.85, "interval_frames": 8, "pulse_len_frames": 1},
+        #                 daemon=True),
 
         # OBD 상시 비정상
-        threading.Thread(target=warning_obd_sim,
-                         kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP,
-                                 "speed": 8.0, "rpm": 3500, "throttle": 0.9, "brake": 1},
-                         daemon=True),
+        #threading.Thread(target=warning_obd_sim,
+        #                 kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP,
+        #                         "speed": 8.0, "rpm": 3500, "throttle": 0.9, "brake": 1},
+        #                 daemon=True),
 
         threading.Thread(target=decision_loop, daemon=True),
     ]
