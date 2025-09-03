@@ -4,6 +4,12 @@ Real-time pedal misoperation detector (fusion of VIDEO/AUDIO/OBD2)
 - 입력: VIDEO 1개 확률값, AUDIO 1개 확률값, OBD2(시리얼) 4개 값 {speed,rpm,throttle,brake}
 - 구조: Producer(3) -> Queue -> Consumer(판단 루프) -> 경고/로그
 """
+import os
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+import sys
 
 import time
 import json
@@ -21,6 +27,39 @@ from producers.audio_real import audio_producer_real
 from producers.video_sim import video_producer
 from producers.serial_loop import serial_producer_loopback_sim
 # from producers.serial_real import serial_producer_real  # 실제 보드 쓸 때
+
+from sensors.voice_rtprob import VoiceRTProb
+from producers.audio_rtprob_producer import audio_rtprob_producer
+
+# warning 시나리오
+from producers.warning_obd_sim import warning_obd_sim
+from producers.warning_video_pulse import warning_video_pulse
+from producers.warning_video_constant import warning_video_constant
+
+
+try:
+    # 라인마다 바로 쓰고 내부 버퍼 우회
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+except Exception:
+    pass
+
+# ==================
+# 로깅/출력 유틸 (시간 기반 스로틀)
+# ==================
+_last_emit_ts = 0.0
+def emit_event(ev, *, min_interval=0.10):  # 0.10s => 10Hz
+    global _last_emit_ts
+    now = time.monotonic()
+    if (now - _last_emit_ts) < min_interval:
+        return
+    _last_emit_ts = now
+    line = json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n"
+    try:
+        os.write(1, line.encode("utf-8"))  # stdout에 직접 씀 (print보다 훨씬 빠름)
+    except Exception:
+        sys.stdout.write(line); sys.stdout.flush()
+
 
 
 # 전역 큐/종료 이벤트
@@ -114,16 +153,6 @@ def serial_producer_real(port="/dev/ttyUSB0", baud=115200):
             print(f"[serial] reconnecting due to: {e}")
             time.sleep(1.0)
 
-# ==================
-# 5) 로깅/출력 유틸
-# ==================
-
-def emit_event(ev: Dict[str, Any]):
-    line = json.dumps(ev, ensure_ascii=False)
-    print(line)
-    if CFG.log_to_file:
-        with open(CFG.log_path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
 
 # ===========================
 # 테스트 시뮬레이터 (정상→WARNING→ALERT)
@@ -138,38 +167,32 @@ def test_scenario_producer():
     """
     seq = 0
 
-    # 1단계: 정상 (3초간 OK)
-    for _ in range(60):  # 20Hz * 3s
-        Q.put(Msg(MsgType.AUDIO, now_s(), {"audio_surprise_prob": 0.1}, seq=seq))
-        Q.put(Msg(MsgType.VIDEO, now_s(), {"face_surprise_prob": 0.1}, seq=seq))
-        Q.put(Msg(MsgType.SERIAL, now_s(), {
-            "brake": 0, "throttle": 0.2, "speed": 30, "rpm": 2000
-        }, seq=seq))
-        seq += 1
-        time.sleep(0.05)
+    while not EV_STOP.is_set():
+        # 1) 정상 3초
+        for _ in range(60):  # 20Hz * 3s
+            Q.put(Msg(MsgType.AUDIO, now_s(), {"audio_surprise_prob": 0.1}, seq=seq))
+            Q.put(Msg(MsgType.VIDEO, now_s(), {"face_surprise_prob": 0.1}, seq=seq))
+            Q.put(Msg(MsgType.SERIAL, now_s(), {"brake": 0, "throttle": 0.2, "speed": 30, "rpm": 2000}, seq=seq))
+            seq += 1
+            time.sleep(0.05)
 
-    # 2단계: WARNING (OBD 이상 + audio peak 순간)
-    for _ in range(10):  # 0.5초
-        Q.put(Msg(MsgType.AUDIO, now_s(), {"audio_surprise_prob": 0.8}, seq=seq))
-        Q.put(Msg(MsgType.VIDEO, now_s(), {"face_surprise_prob": 0.2}, seq=seq))
-        Q.put(Msg(MsgType.SERIAL, now_s(), {
-            "brake": 1, "throttle": 0.9, "speed": 10, "rpm": 3500
-        }, seq=seq))
-        seq += 1
-        time.sleep(0.05)
+        # 2) WARNING 0.5초
+        for _ in range(10):
+            Q.put(Msg(MsgType.AUDIO, now_s(), {"audio_surprise_prob": 0.8}, seq=seq))
+            Q.put(Msg(MsgType.VIDEO, now_s(), {"face_surprise_prob": 0.2}, seq=seq))
+            Q.put(Msg(MsgType.SERIAL, now_s(), {"brake": 1, "throttle": 0.9, "speed": 10, "rpm": 3500}, seq=seq))
+            seq += 1
+            time.sleep(0.05)
 
-    # 3단계: ALERT (OBD 이상 + audio 지속성)
-    for _ in range(40):  # 2초
-        Q.put(Msg(MsgType.AUDIO, now_s(), {"audio_surprise_prob": 0.9}, seq=seq))
-        Q.put(Msg(MsgType.VIDEO, now_s(), {"face_surprise_prob": 0.2}, seq=seq))
-        Q.put(Msg(MsgType.SERIAL, now_s(), {
-            "brake": 1, "throttle": 0.9, "speed": 5, "rpm": 4000
-        }, seq=seq))
-        seq += 1
-        time.sleep(0.05)
+        # 3) ALERT 2초
+        for _ in range(40):
+            Q.put(Msg(MsgType.AUDIO, now_s(), {"audio_surprise_prob": 0.9}, seq=seq))
+            Q.put(Msg(MsgType.VIDEO, now_s(), {"face_surprise_prob": 0.2}, seq=seq))
+            Q.put(Msg(MsgType.SERIAL, now_s(), {"brake": 1, "throttle": 0.9, "speed": 5, "rpm": 4000}, seq=seq))
+            seq += 1
+            time.sleep(0.05)
 
-    EV_STOP.set()
-    
+    # EV_STOP.set() 제거!
 
 
 
@@ -180,41 +203,77 @@ def test_scenario_producer():
 
 def decision_loop():
     state = FusionState(horizon=CFG.buffer_sec)
-    last_emit = 0.0
     last_alert_ts = -1e9
 
-    while not EV_STOP.is_set():
-        try:
-            m: Msg = Q.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        state.add(m)
+    decide_hz = 20.0
+    decide_dt = 1.0 / decide_hz
+    next_t = time.monotonic()
 
-        # 주기적으로 판단 (20Hz 근처)
-        now = now_s()
-        if (now - last_emit) >= 0.05:
+    while not EV_STOP.is_set():
+        # 1) 큐 비우기 (burst drain)
+        drained = 0
+        printed = 0
+        last_rate = time.monotonic()
+        while True:
+            try:
+                m: Msg = Q.get_nowait()
+            except queue.Empty:
+                break
+            state.add(m)
+            drained += 1
+
+        # 2) 고정 주기 판단
+        now = time.monotonic()
+        if now >= next_t:
             res = decide(state, last_alert_ts)
             if res["decision"] in ("WARNING", "ALERT"):
                 if res["decision"] == "ALERT":
                     last_alert_ts = res["ts"]
                 emit_event(res)
-            last_emit = now
+                printed += 1
+                now2 = time.monotonic()
+                if now2 - last_rate >= 1.0:
+                    sys.stderr.write(f"[rate] emitted={printed} lines/s\n"); sys.stderr.flush()
+                    printed = 0
+                    last_rate = now2
+
+            # 다음 틱 예약 (drift 방지)
+            next_t += decide_dt
+            if (now - next_t) > decide_dt:   # 심하게 밀려 있으면 스케줄 재정렬
+                next_t = now + decide_dt
+
+        # 3) CPU 과점 방지
+        time.sleep(0.001)
 
 def main():
     # ★ 마이크 분석기 준비
-    meter = RealTimeOpenSmile()    
-    
+    meter = VoiceRTProb(debug=False)      
     ths = [
         #threading.Thread(target=audio_producer, daemon=True),
-        threading.Thread(target=audio_producer_real,kwargs={"Q": Q, "meter": meter, "fps": CFG.audio_hz, "stop_event": EV_STOP},daemon=True),
-        threading.Thread(target=video_producer,kwargs={"Q": Q, "hz": CFG.video_hz, "stop_event": EV_STOP},daemon=True),
-        threading.Thread(target=serial_producer_loopback_sim,kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP},daemon=True),
+        #threading.Thread(target=audio_producer_real,kwargs={"Q": Q, "meter": meter, "fps": CFG.audio_hz, "stop_event": EV_STOP},daemon=True),
+        threading.Thread(target=audio_rtprob_producer,kwargs={"Q": Q, "stop_event": EV_STOP, "meter": meter, "hz": CFG.audio_hz, "src": "mic0"},daemon=True),        
+        #threading.Thread(target=video_producer,kwargs={"Q": Q, "hz": CFG.video_hz, "stop_event": EV_STOP},daemon=True),
+        #threading.Thread(target=serial_producer_loopback_sim,kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP},daemon=True),
         # # ★ 실제 시리얼 리더 사용 (입력 형식: {"speed","rpm","throttle","brake"})
         # threading.Thread(
         #     target=serial_producer_real,
         #     kwargs={"port": "/dev/ttyUSB0", "baud": 115200},
         #     daemon=True
         # ),
+        
+         # 경고용 비디오 펄스 (WARNING 유지)
+        threading.Thread(
+            target=warning_video_constant,
+            kwargs={"Q": Q, "hz": CFG.video_hz, "stop_event": EV_STOP,
+                    "level": 0.85, "jitter": 0.02},
+            daemon=True
+        ),
+
+        # OBD 상시 비정상
+        threading.Thread(target=warning_obd_sim,
+                         kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP,
+                                 "speed": 8.0, "rpm": 3500, "throttle": 0.9, "brake": 1},
+                         daemon=True),
 
         threading.Thread(target=decision_loop, daemon=True),
     ]
