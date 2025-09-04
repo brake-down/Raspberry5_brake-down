@@ -31,6 +31,11 @@ from producers.video_rtprob_producer import video_rtprob_producer
 from producers.warning_obd_sim import warning_obd_sim
 from producers.warning_video_pulse import warning_video_pulse
 
+import numpy as np
+import cv2
+
+
+
 try:
     # 라인마다 바로 쓰고 내부 버퍼 우회
     sys.stdout.reconfigure(line_buffering=True, write_through=True)
@@ -185,13 +190,25 @@ def test_scenario_producer():
     # EV_STOP.set() 제거!
 
 
+# === 모니터 해상도 ===
+screen_w, screen_h = 1024, 600
 
+# === 창을 풀스크린 모드로 설정 ===
+cv2.namedWindow("Status", cv2.WND_PROP_FULLSCREEN)
+cv2.setWindowProperty("Status", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+def show_white_bg(window_name):
+    """1024x600 흰색 화면만 띄우기"""
+    canvas = np.ones((screen_h, screen_w, 3), dtype=np.uint8) * 255
+    cv2.imshow(window_name, canvas)
 
 # =====================
 # 6) 메인 루프/런처
 # =====================
 
 def decision_loop():
+
+    
     state = FusionState(horizon=CFG.buffer_sec)
     last_alert_ts = -1e9
 
@@ -219,6 +236,12 @@ def decision_loop():
                     last_alert_ts = res["ts"]
                 emit_event(res)
 
+            # 여기가 핵심
+            show_white_bg("Status")
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
             # 다음 틱 예약 (drift 방지)
             next_t += decide_dt
             if (now - next_t) > decide_dt:   # 심하게 밀려 있으면 스케줄 재정렬
@@ -235,7 +258,7 @@ def main():
         #threading.Thread(target=audio_producer_real,kwargs={"Q": Q, "meter": meter, "fps": CFG.audio_hz, "stop_event": EV_STOP},daemon=True),
         threading.Thread(target=audio_rtprob_producer,kwargs={"Q": Q, "stop_event": EV_STOP, "meter": meter, "hz": CFG.audio_hz, "src": "mic0"},daemon=True),        
         threading.Thread(target=video_rtprob_producer,kwargs={"Q": Q, "stop_event": EV_STOP, "hz": CFG.video_hz, "src": "cam0"},daemon=True,),
-        threading.Thread(target=serial_producer_loopback_sim,kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP},daemon=True),
+    threading.Thread(target=serial_producer_loopback_sim,kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP},daemon=True),
         # # ★ 실제 시리얼 리더 사용 (입력 형식: {"speed","rpm","throttle","brake"})
         # threading.Thread(
         #     target=serial_producer_real,
