@@ -25,6 +25,8 @@ from producers.serial_loop import serial_producer_loopback_sim
 
 from sensors.voice_rtprob import VoiceRTProb
 from producers.audio_rtprob_producer import audio_rtprob_producer
+from producers.video_rtprob_producer import video_rtprob_producer
+
 
 from producers.warning_obd_sim import warning_obd_sim
 from producers.warning_video_pulse import warning_video_pulse
@@ -232,8 +234,8 @@ def main():
         #threading.Thread(target=audio_producer, daemon=True),
         #threading.Thread(target=audio_producer_real,kwargs={"Q": Q, "meter": meter, "fps": CFG.audio_hz, "stop_event": EV_STOP},daemon=True),
         threading.Thread(target=audio_rtprob_producer,kwargs={"Q": Q, "stop_event": EV_STOP, "meter": meter, "hz": CFG.audio_hz, "src": "mic0"},daemon=True),        
-        #threading.Thread(target=video_producer,kwargs={"Q": Q, "hz": CFG.video_hz, "stop_event": EV_STOP},daemon=True),
-        #threading.Thread(target=serial_producer_loopback_sim,kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP},daemon=True),
+        threading.Thread(target=video_rtprob_producer,kwargs={"Q": Q, "stop_event": EV_STOP, "hz": CFG.video_hz, "src": "cam0"},daemon=True,),
+        threading.Thread(target=serial_producer_loopback_sim,kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP},daemon=True),
         # # ★ 실제 시리얼 리더 사용 (입력 형식: {"speed","rpm","throttle","brake"})
         # threading.Thread(
         #     target=serial_producer_real,
