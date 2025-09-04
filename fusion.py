@@ -11,8 +11,7 @@ from typing import Any, Dict, List, Optional
 from serial import serial_for_url
 from realtime_analyzer import RealTimeOpenSmile 
 
-import cv2
-import numpy as np
+
 
 # =========================d
 # 0) 설정(튜닝 가능한 값들)
@@ -42,6 +41,9 @@ class Config:
     # 로깅
     log_to_file: bool = False
     log_path: str = "events.log"
+    
+    alert_hold_throttle: float = 0.2   # ALERT 유지 조건 (엑셀 값이 이 값보다 크면 계속 ALERT)
+
 
 CFG = Config()
 
@@ -177,6 +179,10 @@ def decide(state: FusionState, last_alert_ts: float) -> Dict[str, Any]:
         decision = "OK"
 
     # 쿨다운: 직전 ALERT 후 곧바로 반복 경고 억제
+    cur_obd = state.serial[-1].data if state.serial else {}
+    throttle = float(cur_obd.get("throttle", 0.0))
+
+    # 쿨다운 억제 (단, throttle 값이 높을 때는 무시하고 ALERT 유지)
     now = now_s()
     if decision == "ALERT" and (now - last_alert_ts) < CFG.cooldown_sec:
         decision = "OK"
@@ -201,29 +207,3 @@ def decide(state: FusionState, last_alert_ts: float) -> Dict[str, Any]:
     }
     return result
 
-
-cv2.namedWindow("Status", cv2.WND_PROP_FULLSCREEN)
-cv2.setWindowProperty("Status", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
-
-# === 모니터 해상도 ===
-screen_w, screen_h = 1024, 600
-
-cv2.namedWindow("Status", cv2.WND_PROP_FULLSCREEN)
-cv2.setWindowProperty("Status", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
-def show_image(decision: str):
-    """결정 상태와 상관없이 흰 배경만 표시"""
-    # 흰색 배경 캔버스
-    canvas = np.ones((screen_h, screen_w, 3), dtype=np.uint8) * 255
-
-    # 만약 ALERT일 때 표시를 달리하고 싶으면 여기서 색상/텍스트 추가 가능
-    if decision == "ALERT":
-        cv2.putText(canvas, "ALERT", (50, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 0, 255), 5, cv2.LINE_AA)
-    elif decision == "WARNING":
-        cv2.putText(canvas, "WARNING", (50, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 165, 255), 5, cv2.LINE_AA)
-
-    cv2.imshow("Status", canvas)
-    cv2.waitKey(1)

@@ -40,6 +40,7 @@ FLAG_WEIGHTS = {
     "Shimmer 증가(음량 미세 변동)": 0.10,
     "HNR 낮음(잡음↑)": 0.10,
 }
+
 SCALE = 0.6  # 최종 점수 스케일(0.5~0.8 권장)
 
 def _pick_input_device(name_hints=NAME_HINTS) -> Optional[int]:

@@ -75,10 +75,8 @@ def analyze_frame_for_emergency(frame):
     neutral_prob = prediction[expression_labels.index("Neutral")]
     happy_prob = prediction[expression_labels.index("Happy")]
 
-    prob = (surprise_prob * 0.9) + (fear_prob * 0.7) + (angry_prob * 0.4) - (
-        (neutral_prob + happy_prob) * 0.3
-    )
-    final_prob = max(0, min(100, prob * 100))
+    prob = (surprise_prob * 0.9) + (fear_prob * 0.7) + (angry_prob * 0.4) - ((neutral_prob + happy_prob) * 0.3)
+    final_prob = max(0, min(1, prob)) * 100
 
     return expr_label, final_prob
 

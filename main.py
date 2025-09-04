@@ -21,7 +21,7 @@ from fusion import FusionState, decide, now_s, Msg, MsgType, CFG
 from producers.audio_real import audio_producer_real
 from producers.video_sim import video_producer
 from producers.serial_loop import serial_producer_loopback_sim
-# from producers.serial_real import serial_producer_real  # 실제 보드 쓸 때
+from producers.serial_real import serial_producer_real 
 
 from sensors.voice_rtprob import VoiceRTProb
 from producers.audio_rtprob_producer import audio_rtprob_producer
@@ -33,8 +33,9 @@ from producers.warning_video_pulse import warning_video_pulse
 
 import numpy as np
 import cv2
+import os
 
-
+from PIL import Image
 
 try:
     # 라인마다 바로 쓰고 내부 버퍼 우회
@@ -81,73 +82,6 @@ def audio_producer():
 
 
 
-def serial_producer_real(port="/dev/ttyUSB0", baud=115200):
-    """
-    보드 → 라즈베리파이 UART로 들어오는 문자열:
-      /S<speed>/R<rpm>/P<power>/B<brake>
-    예: /S12/R1500/P0.37/B0
-    를 읽어 (speed, rpm, throttle, brake)로 큐에 넣는다.
-    """
-    # P는 정수/소수 모두 허용
-    pattern = re.compile(r'/S(\d+)/R(\d+)/P([0-9]+(?:\.[0-9]+)?)/B(\d+)')
-
-    # 마지막 '인정된' 값(노이즈 필터)
-    S_val = None  # speed
-    R_val = None  # rpm
-    P_val = None  # throttle(power)
-    B_val = None  # brake
-
-    while not EV_STOP.is_set():
-        try:
-            with serial.Serial(port, baud, timeout=1) as ser:
-                try:
-                    ser.reset_input_buffer()
-                except Exception:
-                    pass
-
-                while not EV_STOP.is_set():
-                    raw = ser.readline()
-                    if not raw:
-                        continue
-
-                    line = raw.decode('utf-8', errors='ignore').strip()
-                    m = pattern.fullmatch(line)
-                    if not m:
-                        continue
-
-                    new_S = int(m.group(1))     # speed
-                    new_R = int(m.group(2))     # rpm
-                    new_P = float(m.group(3))   # throttle(power)
-                    new_B = int(m.group(4))     # brake (0/1)
-
-                    # ===== 노이즈/이상치 필터 =====
-                    # S: 직전 값이 양수인데 새 값이 0으로 '뚝' 떨어지면 무시
-                    if not (S_val is not None and S_val > 0 and new_S == 0):
-                        S_val = new_S
-                    # R: 0이면 무시
-                    if new_R != 0:
-                        R_val = new_R
-                    # P: 0.0이면 무시
-                    if new_P != 0.0:
-                        P_val = new_P
-                    # B: 항상 갱신
-                    B_val = new_B
-
-                    # 초기화 미완료면 skip
-                    if None in (S_val, R_val, P_val, B_val):
-                        continue
-
-                    data = {
-                        "speed": float(S_val),
-                        "rpm": int(R_val),
-                        "throttle": float(P_val),
-                        "brake": int(B_val),
-                    }
-                    Q.put(Msg(MsgType.SERIAL, now_s(), data, src="obd_serial"))
-        except Exception as e:
-            print(f"[serial] reconnecting due to: {e}")
-            time.sleep(1.0)
-
 
 # ===========================
 # 테스트 시뮬레이터 (정상→WARNING→ALERT)
@@ -190,25 +124,57 @@ def test_scenario_producer():
     # EV_STOP.set() 제거!
 
 
-# === 모니터 해상도 ===
-screen_w, screen_h = 1024, 600
 
-# === 창을 풀스크린 모드로 설정 ===
-cv2.namedWindow("Status", cv2.WND_PROP_FULLSCREEN)
-cv2.setWindowProperty("Status", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-def show_white_bg(window_name):
-    """1024x600 흰색 화면만 띄우기"""
-    canvas = np.ones((screen_h, screen_w, 3), dtype=np.uint8) * 255
-    cv2.imshow(window_name, canvas)
 
 # =====================
 # 6) 메인 루프/런처
 # =====================
+screen_w, screen_h = 1024, 600
+img_a = cv2.imread("a.png")
+img_b = cv2.imread("b.png")
 
-def decision_loop():
+def make_rgb565(img):
+    """BGR888 이미지를 RGB565 바이트 배열로 변환"""
+    canvas_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    r = (canvas_rgb[:, :, 0] >> 3).astype(np.uint16)
+    g = (canvas_rgb[:, :, 1] >> 2).astype(np.uint16)
+    b = (canvas_rgb[:, :, 2] >> 3).astype(np.uint16)
+    rgb565 = (r << 11) | (g << 5) | b
+    return rgb565.astype(np.uint16).tobytes()
+
+def show_status(decision: str):
+    """상황에 맞는 화면 출력"""
+    if decision == "ALERT":
+        # 빨간 배경 생성
+        red_bg = np.zeros((screen_h, screen_w, 3), dtype=np.uint8)
+        red_bg[:] = (0, 0, 255)  # BGR → 빨간색
+
+        # b.png를 화면 크기에 맞게 리사이즈
+        overlay = cv2.resize(img_b, (screen_w, screen_h))
+
+        # 알파 블렌딩 (투명도 조절해서 b.png가 배경 위에 표시되도록)
+        alpha = 0.8  # 0~1 사이 값 (1이면 b.png만 보이고, 0이면 배경만 보임)
+        base = cv2.addWeighted(overlay, alpha, red_bg, 1 - alpha, 0)
+
+    else:
+        # a.png 전체 화면
+        base = cv2.resize(img_a, (screen_w, screen_h))
+        if decision == "WARNING":
+            # 노란 글씨로 WARNING 표시
+            cv2.putText(
+                base, "WARNING", (50, 100),
+                cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 255), 5, cv2.LINE_AA
+            )
+
+    # 프레임버퍼에 쓰기
+    fb_img = make_rgb565(base)
+    with open("/dev/fb0", "wb") as f:
+        f.write(fb_img)
+
 
     
+def decision_loop():
     state = FusionState(horizon=CFG.buffer_sec)
     last_alert_ts = -1e9
 
@@ -235,13 +201,14 @@ def decision_loop():
                 if res["decision"] == "ALERT":
                     last_alert_ts = res["ts"]
                 emit_event(res)
+        
+            if res["decision"] == "ALERT":
+                last_alert_ts = res["ts"]
+            emit_event(res)
 
-            # 여기가 핵심
-            show_white_bg("Status")
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
+            # 상황에 맞게 화면 표시
+            show_status(res["decision"])
+                
             # 다음 틱 예약 (drift 방지)
             next_t += decide_dt
             if (now - next_t) > decide_dt:   # 심하게 밀려 있으면 스케줄 재정렬
@@ -250,42 +217,31 @@ def decision_loop():
         # 3) CPU 과점 방지
         time.sleep(0.001)
 
+
 def main():
+
     # ★ 마이크 분석기 준비
     meter = VoiceRTProb(debug=False)      
     ths = [
-        #threading.Thread(target=audio_producer, daemon=True),
-        #threading.Thread(target=audio_producer_real,kwargs={"Q": Q, "meter": meter, "fps": CFG.audio_hz, "stop_event": EV_STOP},daemon=True),
-        threading.Thread(target=audio_rtprob_producer,kwargs={"Q": Q, "stop_event": EV_STOP, "meter": meter, "hz": CFG.audio_hz, "src": "mic0"},daemon=True),        
-        threading.Thread(target=video_rtprob_producer,kwargs={"Q": Q, "stop_event": EV_STOP, "hz": CFG.video_hz, "src": "cam0"},daemon=True,),
-    threading.Thread(target=serial_producer_loopback_sim,kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP},daemon=True),
-        # # ★ 실제 시리얼 리더 사용 (입력 형식: {"speed","rpm","throttle","brake"})
-        # threading.Thread(
-        #     target=serial_producer_real,
-        #     kwargs={"port": "/dev/ttyUSB0", "baud": 115200},
-        #     daemon=True
-        # ),
-        
-         # 경고용 비디오 펄스 (WARNING 유지)
-        #threading.Thread(target=warning_video_pulse,
-        #                 kwargs={"Q": Q, "hz": CFG.video_hz, "stop_event": EV_STOP,
-        #                         "base": 0.15, "peak": 0.85, "interval_frames": 8, "pulse_len_frames": 1},
-        #                 daemon=True),
-
-        # OBD 상시 비정상
-        #threading.Thread(target=warning_obd_sim,
-        #                 kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP,
-        #                         "speed": 8.0, "rpm": 3500, "throttle": 0.9, "brake": 1},
-        #                 daemon=True),
-
+        threading.Thread(
+            target=audio_rtprob_producer,
+            kwargs={"Q": Q, "stop_event": EV_STOP, "meter": meter, "hz": CFG.audio_hz, "src": "mic0"},
+            daemon=True,
+        ),
+        threading.Thread(
+            target=video_rtprob_producer,
+            kwargs={"Q": Q, "stop_event": EV_STOP, "hz": CFG.video_hz, "src": "cam0"},
+            daemon=True,
+        ),
+        threading.Thread(
+            target=serial_producer_real,
+            kwargs={"Q": Q, "port": "/dev/ttyUSB0", "baud": 115200, "stop_event": EV_STOP},
+            daemon=True,
+        ),
+        ##threading.Thread(target=serial_producer_loopback_sim,kwargs={"Q": Q, "rate_hz": CFG.obd_hz, "stop_event": EV_STOP},daemon=True),
         threading.Thread(target=decision_loop, daemon=True),
     ]
 
-    # === 테스트 시나리오만 돌릴 땐 아래로 교체 ===
-    # ths = [
-    #     threading.Thread(target=test_scenario_producer, daemon=True),
-    #     threading.Thread(target=decision_loop, daemon=True),
-    # ]
 
     for t in ths: t.start()
 

@@ -25,23 +25,34 @@ def serial_producer_loopback_sim(
 
     # --- writer: 무한 반복 ---
     def writer():
+        # dt = 1.0 / max(1e-6, rate_hz)
+        # while not (stop_event and stop_event.is_set()):
+        #     # 1) 정상 3초
+        #     for _ in range(int(3.0 * rate_hz)):
+        #         ser.write(b"/S30/R2000/P0.20/B0\n")
+        #         time.sleep(dt)
+        #     # 2) WARNING 0.5초
+        #     for _ in range(int(0.5 * rate_hz)):
+        #         ser.write(b"/S10/R3500/P0.90/B1\n")
+        #         time.sleep(dt)
+        #     # 3) ALERT 2초
+        #     for _ in range(int(2.0 * rate_hz)):
+        #         ser.write(b"/S5/R4000/P0.90/B1\n")
+        #         time.sleep(dt)
+        #     # 4) idle 1초 (선택)
+        #     for _ in range(int(1.0 * rate_hz)):
+        #         ser.write(b"/S0/R800/P0.00/B0\n")
+        #         time.sleep(dt)
         dt = 1.0 / max(1e-6, rate_hz)
         while not (stop_event and stop_event.is_set()):
-            # 1) 정상 3초
+            # 1) 정상 5초 (throttle=0.2, brake=0)
+            # for _ in range(int(5.0 * rate_hz)):
+            #     ser.write(b"/S30/R2000/P0.20/B0\n")
+            #     time.sleep(dt)
+
+            # 2) ALERT 3초 (throttle=0.9, brake=1)
             for _ in range(int(3.0 * rate_hz)):
-                ser.write(b"/S30/R2000/P0.20/B0\n")
-                time.sleep(dt)
-            # 2) WARNING 0.5초
-            for _ in range(int(0.5 * rate_hz)):
                 ser.write(b"/S10/R3500/P0.90/B1\n")
-                time.sleep(dt)
-            # 3) ALERT 2초
-            for _ in range(int(2.0 * rate_hz)):
-                ser.write(b"/S5/R4000/P0.90/B1\n")
-                time.sleep(dt)
-            # 4) idle 1초 (선택)
-            for _ in range(int(1.0 * rate_hz)):
-                ser.write(b"/S0/R800/P0.00/B0\n")
                 time.sleep(dt)
 
     threading.Thread(target=writer, daemon=True).start()
